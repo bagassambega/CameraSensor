@@ -41,7 +41,7 @@ function App() {
     <div style={{ padding: "20px", fontFamily: "Arial" }}>
       <h1>IoT Image Monitoring Dashboard</h1>
 
-      {/* ===== METRICS ===== */}
+      {/* METRICS */}
       <div
         style={{
           display: "flex",
@@ -68,7 +68,7 @@ function App() {
         />
       </div>
 
-      {/* ===== IMAGE GRID ===== */}
+      {/* IMAGE GRID */}
       <div
         style={{
           display: "grid",
