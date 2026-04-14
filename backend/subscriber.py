@@ -5,13 +5,20 @@ import sqlite3
 
 import paho.mqtt.client as mqtt
 
-# ===== CONFIG =====
+# CONFIG
 MQTT_BROKER = "192.168.1.11"
 MQTT_PORT = 1883
 MQTT_TOPIC = "esp32/image"
 
 DB_NAME = "camerasensor.db"
 IMAGE_DIR = "received"
+
+# Global state
+latencies = []
+recv_timestamps = []
+total_received = 0
+
+EXPECTED_TOTAL = 130  # 10 + 20 + 100
 
 # Ensure directory exists
 os.makedirs(IMAGE_DIR, exist_ok=True)
@@ -89,13 +96,18 @@ def on_connect(client, userdata, flags, rc):
 
 def on_message(client, userdata, msg):
     try:
+        global total_received
+
         recv_time_us = int(time.time() * 1_000_000)
 
-        # Parse packet
         timestamp_sent, image_data = parse_packet(msg.payload)
 
-        # Compute latency (ms)
         latency_ms = (recv_time_us - timestamp_sent) / 1000.0
+
+        latencies.append(latency_ms)
+        recv_timestamps.append(recv_time_us)
+
+        total_received += 1
 
         # Save image
         image_path = save_image(image_data, recv_time_us)
@@ -110,6 +122,47 @@ def on_message(client, userdata, msg):
         print(f"[ERROR] {e}")
 
 
+# Interval calculation
+def compute_intervals():
+    intervals = []
+    for i in range(1, len(recv_timestamps)):
+        dt = (recv_timestamps[i] - recv_timestamps[i-1]) / 1_000_000
+        intervals.append(dt)
+    return intervals
+
+
+# Summary
+def print_summary():
+    print("\n===== SESSION SUMMARY =====")
+
+    if not latencies:
+        print("No data received")
+        return
+
+    avg_latency = sum(latencies) / len(latencies)
+    min_latency = min(latencies)
+    max_latency = max(latencies)
+
+    intervals = compute_intervals()
+    avg_interval = sum(intervals) / len(intervals) if intervals else 0
+
+    packet_loss = EXPECTED_TOTAL - total_received
+
+    print(f"Total Received   : {total_received}")
+    print(f"Expected         : {EXPECTED_TOTAL}")
+    print(f"Packet Loss      : {packet_loss}")
+
+    print("\nLatency (ms):")
+    print(f"  Avg            : {avg_latency:.2f}")
+    print(f"  Min            : {min_latency:.2f}")
+    print(f"  Max            : {max_latency:.2f}")
+
+    print("\nInterval (sec):")
+    print(f"  Avg Interval   : {avg_interval:.2f}")
+
+    print("===========================\n")
+
+
 # MAIN
 def main():
     init_db()
@@ -121,7 +174,11 @@ def main():
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
 
     print("[SYSTEM] Subscriber started...")
-    client.loop_forever()
+    try:
+        client.loop_forever()
+    except KeyboardInterrupt:
+        print("\n[INFO] Stopping subscriber...")
+        print_summary()
 
 
 if __name__ == "__main__":
