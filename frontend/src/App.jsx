@@ -29,7 +29,7 @@ function App() {
         fontFamily: "system-ui, -apple-system, sans-serif",
       }}
     >
-      <h1 style={{ color: "#333" }}>Live IoT Dashboard</h1>
+      <h1 style={{ color: "#333" }}>Camera Detection Dashboard</h1>
 
       {latestStats && (
         <div
