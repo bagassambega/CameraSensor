@@ -1,114 +1,62 @@
 import { useEffect, useState } from "react";
 
+const WS_URL = "ws://localhost:8000/ws";
 const API_BASE = "http://localhost:8000";
 
 function App() {
   const [images, setImages] = useState([]);
-  const [metrics, setMetrics] = useState({});
-
-  // Fetch images
-  const fetchImages = async () => {
-    const res = await fetch(`${API_BASE}/api/images`);
-    const data = await res.json();
-    setImages(data);
-  };
-
-  // Fetch metrics
-  const fetchMetrics = async () => {
-    const res = await fetch(`${API_BASE}/api/metrics`);
-    const data = await res.json();
-    setMetrics(data);
-  };
 
   useEffect(() => {
-    const initialLoad = setTimeout(() => {
-      void fetchImages();
-      void fetchMetrics();
-    }, 0);
+    const ws = new WebSocket(WS_URL);
 
-    const interval = setInterval(() => {
-      void fetchImages();
-      void fetchMetrics();
-    }, 2000);
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
 
-    return () => {
-      clearTimeout(initialLoad);
-      clearInterval(interval);
+      setImages((prev) => [data, ...prev].slice(0, 100));
     };
+
+    return () => ws.close();
   }, []);
 
   return (
-    <div style={{ padding: "20px", fontFamily: "Arial" }}>
-      <h1>IoT Image Monitoring Dashboard</h1>
+    <div
+      style={{
+        padding: "20px",
+        backgroundColor: "#f5f5f5",
+        minHeight: "100vh",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+      }}
+    >
+      <h1 style={{ color: "#333" }}>Live IoT Dashboard</h1>
 
-      {/* METRICS */}
-      <div
-        style={{
-          display: "flex",
-          gap: "20px",
-          marginBottom: "20px",
-        }}
-      >
-        <Metric title="Total Received" value={metrics.total_received} />
-        <Metric
-          title="Avg Latency (ms)"
-          value={metrics.avg_latency?.toFixed(2)}
-        />
-        <Metric
-          title="Min Latency (ms)"
-          value={metrics.min_latency?.toFixed(2)}
-        />
-        <Metric
-          title="Max Latency (ms)"
-          value={metrics.max_latency?.toFixed(2)}
-        />
-        <Metric
-          title="Avg Interval (s)"
-          value={metrics.avg_interval?.toFixed(2)}
-        />
-      </div>
-
-      {/* IMAGE GRID */}
       <div
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-          gap: "15px",
+          gap: "10px",
         }}
       >
-        {images.map((img) => (
+        {images.map((img, i) => (
           <div
-            key={img.id}
+            key={i}
             style={{
-              border: "1px solid #ccc",
+              backgroundColor: "white",
+              borderRadius: "8px",
               padding: "10px",
+              boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
+              overflow: "hidden",
             }}
           >
             <img
               src={`${API_BASE}${img.image_url}`}
-              style={{ width: "100%" }}
+              style={{ width: "100%", borderRadius: "4px" }}
             />
-            <p style={{ fontSize: "12px" }}>
-              Latency: {img.latency_ms.toFixed(2)} ms
+            <p style={{ color: "#666", marginTop: "8px", marginBottom: 0 }}>
+              {img.latency.toFixed(2)} ms
             </p>
           </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-function Metric({ title, value }) {
-  return (
-    <div
-      style={{
-        border: "1px solid #ccc",
-        padding: "10px",
-        minWidth: "150px",
-      }}
-    >
-      <h4>{title}</h4>
-      <p>{value ?? "-"}</p>
     </div>
   );
 }

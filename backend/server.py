@@ -1,81 +1,152 @@
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
+import os
+import struct
+import time
 import sqlite3
+import threading
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+
+import paho.mqtt.client as mqtt
+
+# CONFIG
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+MQTT_TOPIC = "esp32/image"
 
 DB_NAME = "camerasensor.db"
 IMAGE_DIR = "received"
 
-# Serve images as static files
+os.makedirs(IMAGE_DIR, exist_ok=True)
+
+
+# LIFESPAN HANDLER
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    init_db()
+    thread = threading.Thread(target=mqtt_thread)
+    thread.daemon = True
+    thread.start()
+    yield
+    # Shutdown
+
+
+app = FastAPI(lifespan=lifespan)
 app.mount("/images", StaticFiles(directory=IMAGE_DIR), name="images")
 
 
-# DB HELPER
-def query_db(query):
+# WEBSOCKET MANAGER
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in self.active_connections:
+            await connection.send_json(message)
+
+
+manager = ConnectionManager()
+
+
+# DB
+def init_db():
+    """Initialize database and create tables if they don't exist"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute(query)
-    rows = cursor.fetchall()
+
+    cursor.execute(
+        """
+    CREATE TABLE IF NOT EXISTS images (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        test_group INTEGER,
+        timestamp_sent INTEGER,
+        timestamp_received INTEGER,
+        latency_ms REAL,
+        image_path TEXT
+    )
+    """
+    )
+
+    conn.commit()
     conn.close()
-    return rows
 
 
-# GET ALL IMAGES
-@app.get("/api/images")
-def get_images():
-    rows = query_db("""
-        SELECT id, timestamp_sent, timestamp_received, latency_ms, image_path
-        FROM images
-        ORDER BY timestamp_received DESC
-        LIMIT 100
-    """)
+def store_metadata(ts_sent, ts_recv, latency, path):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
 
-    result = []
-    for r in rows:
-        result.append({
-            "id": r[0],
-            "timestamp_sent": r[1],
-            "timestamp_received": r[2],
-            "latency_ms": r[3],
-            "image_url": f"/images/{r[4].split('/')[-1]}"
-        })
+    cursor.execute(
+        """
+    INSERT INTO images (timestamp_sent, timestamp_received, latency_ms, image_path)
+    VALUES (?, ?, ?, ?)
+    """,
+        (ts_sent, ts_recv, latency, path),
+    )
 
-    return result
+    conn.commit()
+    conn.close()
 
 
-# METRICS
-@app.get("/api/metrics")
-def get_metrics():
-    rows = query_db("""
-        SELECT latency_ms, timestamp_received
-        FROM images
-        ORDER BY timestamp_received ASC
-    """)
+# MQTT HANDLER
+def on_message(client, userdata, msg):
+    try:
+        recv_time = int(time.time() * 1_000_000)
 
-    if not rows:
-        return {}
+        ts_sent = struct.unpack("<Q", msg.payload[0:8])[0]
+        img_size = struct.unpack("<I", msg.payload[8:12])[0]
+        img_data = msg.payload[12 : 12 + img_size]
 
-    latencies = [r[0] for r in rows]
-    timestamps = [r[1] for r in rows]
+        latency = (recv_time - ts_sent) / 1000.0
 
-    # latency
-    avg_latency = sum(latencies) / len(latencies)
-    min_latency = min(latencies)
-    max_latency = max(latencies)
+        filename = f"{recv_time}.jpg"
+        path = os.path.join(IMAGE_DIR, filename)
 
-    # interval
-    intervals = []
-    for i in range(1, len(timestamps)):
-        dt = (timestamps[i] - timestamps[i-1]) / 1_000_000
-        intervals.append(dt)
+        with open(path, "wb") as f:
+            f.write(img_data)
 
-    avg_interval = sum(intervals) / len(intervals) if intervals else 0
+        store_metadata(ts_sent, recv_time, latency, path)
 
-    return {
-        "total_received": len(rows),
-        "avg_latency": avg_latency,
-        "min_latency": min_latency,
-        "max_latency": max_latency,
-        "avg_interval": avg_interval
-    }
+        # Push to frontend (async)
+        import asyncio
+
+        asyncio.run(
+            manager.broadcast(
+                {
+                    "image_url": f"/images/{filename}",
+                    "latency": latency,
+                    "timestamp": recv_time,
+                }
+            )
+        )
+
+    except Exception as e:
+        print("Error:", e)
+
+
+def mqtt_thread():
+    client = mqtt.Client()
+    client.connect(MQTT_BROKER, MQTT_PORT, 60)
+    client.subscribe(MQTT_TOPIC)
+    client.on_message = on_message
+    client.loop_forever()
+
+
+# WEBSOCKET
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+
+    try:
+        while True:
+            await websocket.receive_text()  # keep alive
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
