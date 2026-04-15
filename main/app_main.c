@@ -22,19 +22,19 @@
 
 static const char *TAG = "MQTT_IMAGE_APP";
 
-// ======== CONFIG ========
+// CONFIG
 #define XYZ 71
 #define T_INTERVAL_SEC ((XYZ % 10) + 1)   // = 2 seconds
 int send_counts[] = {10, 20, 100};
 #define MQTT_TOPIC "esp32/image"
 
-// ======== IMAGE STRUCT ========
+// IMAGE STRUCT
 typedef struct {
     const uint8_t *data;
     size_t size;
 } image_t;
 
-// ======== IMAGE ARRAY ========
+// IMAGE ARRAY
 static image_t images[] = {
     { frame_000_jpg, frame_000_jpg_len },
     { frame_001_jpg, frame_001_jpg_len },
@@ -46,7 +46,7 @@ static image_t images[] = {
 
 #define NUM_IMAGES (sizeof(images) / sizeof(images[0]))
 
-// ======== PACKET BUILDER ========
+// PACKET BUILDER
 static uint8_t *build_packet(const uint8_t *image, size_t image_size, size_t *out_size)
 {
     uint64_t timestamp = esp_timer_get_time(); // microseconds
@@ -73,7 +73,7 @@ static uint8_t *build_packet(const uint8_t *image, size_t image_size, size_t *ou
     return packet;
 }
 
-// ======== SENDING TASK ========
+// SENDING TASK
 static void send_image_task(void *pvParameters)
 {
     esp_mqtt_client_handle_t client = (esp_mqtt_client_handle_t)pvParameters;
@@ -131,7 +131,7 @@ static void send_image_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-// ======== MQTT EVENT HANDLER ========
+// MQTT EVENT HANDLER
 static void mqtt_event_handler(void *handler_args,
                                esp_event_base_t base,
                                int32_t event_id,
@@ -171,7 +171,7 @@ static void mqtt_event_handler(void *handler_args,
     }
 }
 
-// ======== MQTT INIT ========
+// MQTT INIT
 static void mqtt_app_start(void)
 {
     const esp_mqtt_client_config_t mqtt_cfg = {
@@ -188,7 +188,7 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(client);
 }
 
-// ======== MAIN ========
+// MAIN
 void app_main(void)
 {
     ESP_LOGI(TAG, "System startup");
