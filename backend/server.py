@@ -18,7 +18,14 @@ MQTT_TOPIC = "esp32/image"
 DB_NAME = "camerasensor.db"
 IMAGE_DIR = "received"
 
+EXPECTED_TOTAL = 130  # Total expected images
+
 os.makedirs(IMAGE_DIR, exist_ok=True)
+
+# Global state for statistics
+latencies = []
+recv_timestamps = []
+total_received = 0
 
 
 # LIFESPAN HANDLER
@@ -96,6 +103,42 @@ def store_metadata(ts_sent, ts_recv, latency, path):
     conn.close()
 
 
+# STATISTICS
+def compute_intervals():
+    """Calculate time intervals between received images"""
+    intervals = []
+    for i in range(1, len(recv_timestamps)):
+        dt = (recv_timestamps[i] - recv_timestamps[i - 1]) / 1_000_000
+        intervals.append(dt)
+    return intervals
+
+
+def get_statistics():
+    """Compute current session statistics"""
+    if not latencies:
+        return {
+            "total_received": 0,
+            "expected": EXPECTED_TOTAL,
+            "packet_loss": EXPECTED_TOTAL,
+            "avg_latency": 0,
+            "min_latency": 0,
+            "max_latency": 0,
+            "avg_interval": 0,
+        }
+
+    intervals = compute_intervals()
+
+    return {
+        "total_received": total_received,
+        "expected": EXPECTED_TOTAL,
+        "packet_loss": EXPECTED_TOTAL - total_received,
+        "avg_latency": sum(latencies) / len(latencies),
+        "min_latency": min(latencies),
+        "max_latency": max(latencies),
+        "avg_interval": sum(intervals) / len(intervals) if intervals else 0,
+    }
+
+
 # MQTT HANDLER
 def on_message(client, userdata, msg):
     try:
@@ -118,12 +161,20 @@ def on_message(client, userdata, msg):
         # Push to frontend (async)
         import asyncio
 
+        global total_received
+        latencies.append(latency)
+        recv_timestamps.append(recv_time)
+        total_received += 1
+
+        stats = get_statistics()
+
         asyncio.run(
             manager.broadcast(
                 {
                     "image_url": f"/images/{filename}",
                     "latency": latency,
                     "timestamp": recv_time,
+                    "stats": stats,
                 }
             )
         )
