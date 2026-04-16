@@ -19,16 +19,20 @@ recv_timestamps = []
 total_received = 0
 
 EXPECTED_TOTAL = 130  # 10 + 20 + 100
+HEADER_FMT = "<QHHI"  # ts_sent_us, test_group, sequence_in_test, image_size
+HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 # Ensure directory exists
 os.makedirs(IMAGE_DIR, exist_ok=True)
+
 
 # DATABASE SETUP
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
     CREATE TABLE IF NOT EXISTS images (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp_sent INTEGER,
@@ -36,7 +40,8 @@ def init_db():
         latency_ms REAL,
         image_path TEXT
     )
-    """)
+    """
+    )
 
     conn.commit()
     conn.close()
@@ -46,21 +51,21 @@ def init_db():
 def parse_packet(payload: bytes):
     """
     Parse binary packet:
-    [8 bytes timestamp][4 bytes size][image]
+    [8 bytes timestamp][2 bytes test_group][2 bytes sequence][4 bytes size][image]
     """
-    if len(payload) < 12:
+    if len(payload) < HEADER_SIZE:
         raise ValueError("Payload too small")
 
-    # Little-endian unpack
-    timestamp_sent = struct.unpack("<Q", payload[0:8])[0]
-    image_size = struct.unpack("<I", payload[8:12])[0]
+    timestamp_sent, test_group, sequence_in_test, image_size = struct.unpack(
+        HEADER_FMT, payload[0:HEADER_SIZE]
+    )
 
-    image_data = payload[12:12 + image_size]
+    image_data = payload[HEADER_SIZE : HEADER_SIZE + image_size]
 
     if len(image_data) != image_size:
         raise ValueError("Image size mismatch")
 
-    return timestamp_sent, image_data
+    return timestamp_sent, test_group, sequence_in_test, image_data
 
 
 # SAVE IMAGE
@@ -79,10 +84,13 @@ def store_metadata(timestamp_sent, timestamp_received, latency_ms, image_path):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    cursor.execute("""
+    cursor.execute(
+        """
     INSERT INTO images (timestamp_sent, timestamp_received, latency_ms, image_path)
     VALUES (?, ?, ?, ?)
-    """, (timestamp_sent, timestamp_received, latency_ms, image_path))
+    """,
+        (timestamp_sent, timestamp_received, latency_ms, image_path),
+    )
 
     conn.commit()
     conn.close()
@@ -98,11 +106,13 @@ def on_message(client, userdata, msg):
     try:
         global total_received
 
-        recv_time_us = int(time.time() * 1_000_000)
+        recv_time_us = time.time_ns() // 1000
 
-        timestamp_sent, image_data = parse_packet(msg.payload)
+        timestamp_sent, test_group, sequence_in_test, image_data = parse_packet(
+            msg.payload
+        )
 
-        latency_ms = (recv_time_us - timestamp_sent) / 1000.0
+        latency_ms = max(0.0, (recv_time_us - timestamp_sent) / 1000.0)
 
         latencies.append(latency_ms)
         recv_timestamps.append(recv_time_us)
@@ -115,7 +125,7 @@ def on_message(client, userdata, msg):
         # Store to DB
         store_metadata(timestamp_sent, recv_time_us, latency_ms, image_path)
 
-        print(f"[RECV] Image saved: {image_path}")
+        print(f"[RECV] N={test_group} seq={sequence_in_test} image saved: {image_path}")
         print(f"[INFO] Latency: {latency_ms:.2f} ms")
 
     except Exception as e:
@@ -126,7 +136,7 @@ def on_message(client, userdata, msg):
 def compute_intervals():
     intervals = []
     for i in range(1, len(recv_timestamps)):
-        dt = (recv_timestamps[i] - recv_timestamps[i-1]) / 1_000_000
+        dt = (recv_timestamps[i] - recv_timestamps[i - 1]) / 1_000_000
         intervals.append(dt)
     return intervals
 

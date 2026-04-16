@@ -3,11 +3,25 @@ import { useEffect, useState } from "react";
 const WS_URL = "ws://localhost:8000/ws";
 const API_BASE = "http://localhost:8000";
 const MAX_LATENCY_POINTS = 24;
+const MAX_TREND_POINTS = 120;
+const TEST_GROUPS = [10, 20, 100];
+const COMPACT_NUMBER = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 2,
+});
+
+function createEmptyTrends() {
+  return TEST_GROUPS.reduce((acc, n) => {
+    acc[n] = { latency: [], interval: [] };
+    return acc;
+  }, {});
+}
 
 function App() {
   const [images, setImages] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
   const [latencyPoints, setLatencyPoints] = useState([]);
+  const [trendByTest, setTrendByTest] = useState(() => createEmptyTrends());
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
@@ -20,8 +34,31 @@ function App() {
 
       setImages((prev) => [data, ...prev].slice(0, 100));
       setLatencyPoints((prev) =>
-        [data.latency, ...prev].slice(0, MAX_LATENCY_POINTS),
+        [...prev, data.latency].slice(-MAX_LATENCY_POINTS),
       );
+
+      const testGroup = Number(data.test_group);
+      if (Number.isFinite(testGroup)) {
+        setTrendByTest((prev) => {
+          const current = prev[testGroup] ?? { latency: [], interval: [] };
+          const nextLatency = [...current.latency, data.latency].slice(
+            -MAX_TREND_POINTS,
+          );
+          const nextInterval = Number.isFinite(data.recv_interval_s)
+            ? [...current.interval, data.recv_interval_s].slice(
+                -MAX_TREND_POINTS,
+              )
+            : current.interval;
+
+          return {
+            ...prev,
+            [testGroup]: {
+              latency: nextLatency,
+              interval: nextInterval,
+            },
+          };
+        });
+      }
     };
 
     return () => ws.close();
@@ -32,6 +69,9 @@ function App() {
   const latestLatency = images[0]?.latency;
   const sparklineWidth = 320;
   const sparklineHeight = 96;
+  const safePacketLoss = latestStats
+    ? Math.max(0, latestStats.packet_loss)
+    : undefined;
 
   return (
     <div className="min-h-screen bg-[#050816] text-slate-100">
@@ -73,21 +113,23 @@ function App() {
                 label="Avg latency"
                 value={
                   latestStats
-                    ? `${latestStats.avg_latency.toFixed(2)} ms`
+                    ? formatDuration(latestStats.avg_latency, "ms")
                     : "--"
                 }
                 tone="amber"
               />
               <StatPill
                 label="Packet loss"
-                value={latestStats ? String(latestStats.packet_loss) : "--"}
+                value={
+                  latestStats ? COMPACT_NUMBER.format(safePacketLoss) : "--"
+                }
                 tone="rose"
               />
               <StatPill
                 label="Avg interval"
                 value={
                   latestStats
-                    ? `${latestStats.avg_interval.toFixed(2)} s`
+                    ? formatDuration(latestStats.avg_interval, "s")
                     : "--"
                 }
                 tone="emerald"
@@ -105,7 +147,9 @@ function App() {
                   </p>
                 </div>
                 <div className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
-                  {latestLatency ? `${latestLatency.toFixed(2)} ms` : "No data"}
+                  {latestLatency
+                    ? formatDuration(latestLatency, "ms")
+                    : "No data"}
                 </div>
               </div>
 
@@ -126,25 +170,25 @@ function App() {
               <MetricCard
                 title="Packets received"
                 value={`${latestStats.total_received} / ${latestStats.expected}`}
-                caption={`Packet loss: ${latestStats.packet_loss}`}
+                caption={`Packet loss: ${COMPACT_NUMBER.format(safePacketLoss)}`}
                 accent="from-cyan-400 to-blue-500"
               />
               <MetricCard
                 title="Latency range"
-                value={`${latestStats.min_latency.toFixed(2)} - ${latestStats.max_latency.toFixed(2)} ms`}
+                value={`${formatDuration(latestStats.min_latency, "ms")} - ${formatDuration(latestStats.max_latency, "ms")}`}
                 caption="Fastest and slowest observed packets"
                 accent="from-fuchsia-400 to-pink-500"
               />
               <MetricCard
                 title="Session average"
-                value={`${latestStats.avg_latency.toFixed(2)} ms`}
+                value={formatDuration(latestStats.avg_latency, "ms")}
                 caption="Running average across the current session"
                 accent="from-amber-400 to-orange-500"
               />
               <MetricCard
                 title="Capture cadence"
-                value={`${latestStats.avg_interval.toFixed(2)} s`}
-                caption="Average time between received frames"
+                value={formatDuration(latestStats.avg_interval, "s")}
+                caption="Average receive interval between frames"
                 accent="from-emerald-400 to-teal-500"
               />
             </section>
@@ -162,6 +206,22 @@ function App() {
               </p>
             </section>
           )}
+
+          <section className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+            {TEST_GROUPS.map((group) => {
+              const testStats = latestStats?.by_test?.[String(group)];
+              const trend = trendByTest[group] ?? { latency: [], interval: [] };
+
+              return (
+                <TestTrendCard
+                  key={group}
+                  group={group}
+                  trend={trend}
+                  stats={testStats}
+                />
+              );
+            })}
+          </section>
 
           <section className="rounded-[1.75rem] border border-white/10 bg-white/5 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.03)] backdrop-blur-xl sm:p-6">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -195,11 +255,16 @@ function App() {
                       <div className="absolute left-3 top-3 rounded-full border border-white/15 bg-slate-950/70 px-2.5 py-1 text-xs font-medium text-cyan-200 backdrop-blur">
                         {img.latency.toFixed(2)} ms
                       </div>
+                      {Number.isFinite(img.test_group) && (
+                        <div className="absolute right-3 top-3 rounded-full border border-white/15 bg-slate-950/70 px-2.5 py-1 text-xs font-medium text-emerald-200 backdrop-blur">
+                          N={img.test_group}
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center justify-between gap-3 px-4 py-3">
                       <div>
                         <p className="text-sm font-medium text-white">
-                          Live frame
+                          Live frame #{img.sequence_in_test ?? "-"}
                         </p>
                         <p className="text-xs text-slate-400">
                           {new Date(img.timestamp / 1000).toLocaleTimeString()}
@@ -239,7 +304,9 @@ function StatPill({ label, value, tone }) {
       <p className="text-xs font-medium uppercase tracking-[0.22em] opacity-80">
         {label}
       </p>
-      <p className="mt-2 text-lg font-semibold text-white">{value}</p>
+      <p className="mt-2 overflow-hidden text-lg leading-tight font-semibold text-white break-words">
+        {value}
+      </p>
     </div>
   );
 }
@@ -251,7 +318,7 @@ function MetricCard({ title, value, caption, accent }) {
       <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-400">
         {title}
       </p>
-      <p className="mt-2 text-2xl font-semibold tracking-tight text-white">
+      <p className="mt-2 text-2xl leading-tight font-semibold tracking-tight text-white break-words">
         {value}
       </p>
       <p className="mt-2 text-sm leading-6 text-slate-400">{caption}</p>
@@ -259,11 +326,125 @@ function MetricCard({ title, value, caption, accent }) {
   );
 }
 
-function Sparkline({ values, width, height }) {
+function TestTrendCard({ group, trend, stats }) {
+  const latencyLast = trend.latency.at(-1);
+  const intervalLast = trend.interval.at(-1);
+
+  return (
+    <article className="overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)] backdrop-blur-xl">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-xs uppercase tracking-[0.22em] text-slate-400">
+            Test group
+          </p>
+          <p className="mt-1 text-xl font-semibold text-white">N={group}</p>
+        </div>
+        <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300">
+          {stats ? `${stats.received}/${stats.expected}` : "0/0"}
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-4">
+        <div>
+          <div className="mb-2 flex items-center justify-between text-xs">
+            <span className="uppercase tracking-[0.2em] text-slate-400">
+              Latency trend
+            </span>
+            <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-cyan-200">
+              {Number.isFinite(latencyLast)
+                ? formatDuration(latencyLast, "ms")
+                : "No data"}
+            </span>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
+            <Sparkline
+              values={trend.latency}
+              width={300}
+              height={72}
+              strokeStart="#22d3ee"
+              strokeMid="#3b82f6"
+              strokeEnd="#22c55e"
+            />
+          </div>
+        </div>
+
+        <div>
+          <div className="mb-2 flex items-center justify-between text-xs">
+            <span className="uppercase tracking-[0.2em] text-slate-400">
+              Interval trend
+            </span>
+            <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-0.5 text-emerald-200">
+              {Number.isFinite(intervalLast)
+                ? formatDuration(intervalLast, "s")
+                : "No data"}
+            </span>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
+            <Sparkline
+              values={trend.interval}
+              width={300}
+              height={72}
+              strokeStart="#34d399"
+              strokeMid="#10b981"
+              strokeEnd="#a7f3d0"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400">
+        <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+          Avg latency: {stats ? formatDuration(stats.avg_latency, "ms") : "--"}
+        </div>
+        <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+          Avg interval: {stats ? formatDuration(stats.avg_interval, "s") : "--"}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function formatDuration(value, unit) {
+  if (!Number.isFinite(value)) return "--";
+
+  if (unit === "ms") {
+    if (value >= 1000) {
+      return `${(value / 1000).toFixed(2)} s`;
+    }
+
+    return `${value.toFixed(2)} ms`;
+  }
+
+  if (unit === "s") {
+    if (value >= 60) {
+      const minutes = value / 60;
+      return `${minutes.toFixed(2)} min`;
+    }
+
+    return `${value.toFixed(2)} s`;
+  }
+
+  return COMPACT_NUMBER.format(value);
+}
+
+function Sparkline({
+  values,
+  width,
+  height,
+  strokeStart = "#22d3ee",
+  strokeMid = "#a78bfa",
+  strokeEnd = "#34d399",
+}) {
   const points = values.length > 0 ? values : [0];
   const min = Math.min(...points);
   const max = Math.max(...points);
   const range = max - min || 1;
+  const gradientId =
+    `sparklineStroke-${strokeStart}-${strokeMid}-${strokeEnd}`.replace(
+      /[^a-zA-Z0-9-]/g,
+      "",
+    );
+  const fillId = `${gradientId}-fill`;
 
   const path = points
     .map((value, index) => {
@@ -279,12 +460,12 @@ function Sparkline({ values, width, height }) {
       className="h-24 w-full overflow-visible"
     >
       <defs>
-        <linearGradient id="sparklineStroke" x1="0%" y1="0%" x2="100%" y2="0%">
-          <stop offset="0%" stopColor="#22d3ee" />
-          <stop offset="50%" stopColor="#a78bfa" />
-          <stop offset="100%" stopColor="#34d399" />
+        <linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="0%">
+          <stop offset="0%" stopColor={strokeStart} />
+          <stop offset="50%" stopColor={strokeMid} />
+          <stop offset="100%" stopColor={strokeEnd} />
         </linearGradient>
-        <linearGradient id="sparklineFill" x1="0%" y1="0%" x2="0%" y2="100%">
+        <linearGradient id={fillId} x1="0%" y1="0%" x2="0%" y2="100%">
           <stop offset="0%" stopColor="rgba(34, 211, 238, 0.28)" />
           <stop offset="100%" stopColor="rgba(34, 211, 238, 0)" />
         </linearGradient>
@@ -292,12 +473,12 @@ function Sparkline({ values, width, height }) {
 
       <path
         d={`${path} L ${width} ${height} L 0 ${height} Z`}
-        fill="url(#sparklineFill)"
+        fill={`url(#${fillId})`}
       />
       <path
         d={path}
         fill="none"
-        stroke="url(#sparklineStroke)"
+        stroke={`url(#${gradientId})`}
         strokeWidth="3"
         strokeLinecap="round"
         strokeLinejoin="round"
