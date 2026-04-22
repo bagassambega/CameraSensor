@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 import paho.mqtt.client as mqtt
 
 # CONFIG
-MQTT_BROKER = "192.168.1.11"
+MQTT_BROKER = "10.134.67.51"
 MQTT_PORT = 1883
 MQTT_TOPIC = "esp32/image"
 
@@ -33,16 +33,48 @@ IMAGE_DIR = "received"
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Global state -- motion-event oriented statistics
+# Global state
 # ---------------------------------------------------------------------------
 latencies = []
 recv_timestamps = []
 recv_intervals = []
-total_received = 0           # Total motion-detected frames received
-frame_indices = []           # Track which video frame indices had motion
+total_received = 0  # Total motion-detected frames received
+frame_indices = []  # Track which video frame indices had motion
 
 HEADER_FMT = "<QHHI"  # ts_sent_us, test_group, sequence_in_test, image_size
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
+MAX_VALID_LATENCY_MS = 30_000.0
+
+
+def normalize_sender_timestamp_us(ts_sent_raw: int, recv_time_us: int):
+    """Normalize sender timestamp to microseconds.
+
+    Accepts sender timestamps in seconds/ms/us/ns and converts to us.
+    Returns None when the value cannot be interpreted safely.
+    """
+    if ts_sent_raw <= 0:
+        return None
+
+    # Seconds since epoch
+    if ts_sent_raw < 10**11:
+        ts_us = ts_sent_raw * 1_000_000
+    # Milliseconds since epoch
+    elif ts_sent_raw < 10**14:
+        ts_us = ts_sent_raw * 1_000
+    # Microseconds since epoch
+    elif ts_sent_raw < 10**17:
+        ts_us = ts_sent_raw
+    # Nanoseconds since epoch
+    elif ts_sent_raw < 10**20:
+        ts_us = ts_sent_raw // 1_000
+    else:
+        return None
+
+    # Reject clock jump or corrupt packet
+    if ts_us > recv_time_us + 5_000_000:
+        return None
+
+    return ts_us
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +137,7 @@ def init_db():
     """
     )
 
-    # Ensure all columns exist (forward-compatible with Level 1 schema)
+    # Ensure all columns exist
     existing_columns = {
         row[1] for row in cursor.execute("PRAGMA table_info(images)").fetchall()
     }
@@ -140,7 +172,7 @@ def store_metadata(
 
 
 # ---------------------------------------------------------------------------
-# Statistics -- motion-event oriented
+# Statistics
 # ---------------------------------------------------------------------------
 def get_statistics():
     if not latencies:
@@ -189,9 +221,16 @@ def on_message(client, userdata, msg):
     try:
         recv_time = time.time_ns() // 1000
 
-        ts_sent, test_group, sequence_in_test, img_data = parse_packet(msg.payload)
+        ts_sent_raw, test_group, sequence_in_test, img_data = parse_packet(msg.payload)
 
-        latency = max(0.0, (recv_time - ts_sent) / 1000.0)
+        ts_sent = normalize_sender_timestamp_us(ts_sent_raw, recv_time)
+        latency = None
+        if ts_sent is not None:
+            candidate_latency = (recv_time - ts_sent) / 1000.0
+            if 0.0 <= candidate_latency <= MAX_VALID_LATENCY_MS:
+                latency = candidate_latency
+
+        latency_for_payload = latency if latency is not None else 0.0
 
         # Compute receive interval
         recv_interval = None
@@ -208,13 +247,19 @@ def on_message(client, userdata, msg):
             f.write(img_data)
 
         store_metadata(
-            test_group, sequence_in_test,
-            ts_sent, recv_time, latency, recv_interval, path,
+            test_group,
+            sequence_in_test,
+            ts_sent if ts_sent is not None else ts_sent_raw,
+            recv_time,
+            latency_for_payload,
+            recv_interval,
+            path,
         )
 
         # Update global state
         global total_received
-        latencies.append(latency)
+        if latency is not None:
+            latencies.append(latency)
         recv_timestamps.append(recv_time)
         frame_indices.append(sequence_in_test)
         total_received += 1
@@ -223,11 +268,12 @@ def on_message(client, userdata, msg):
 
         # Push to frontend
         import asyncio
+
         asyncio.run(
             manager.broadcast(
                 {
                     "image_url": f"/images/{filename}",
-                    "latency": latency,
+                    "latency": latency_for_payload,
                     "timestamp": recv_time,
                     "timestamp_sent": ts_sent,
                     "frame_index": sequence_in_test,
