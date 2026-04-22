@@ -1,8 +1,9 @@
 """
 generate_video.py
 -----------------
-Generates a synthetic 640x480 grayscale test video with alternating
-motion and static segments.  Output: test_video.avi (MJPEG codec).
+Generates a synthetic 640x480 grayscale test video with a short burst of
+obvious motion inside a mostly static sequence. Output: test_video.avi
+(MJPEG codec).
 
 Motion segments: white squares move across the frame.
 Static segments: objects remain stationary.
@@ -13,7 +14,10 @@ to validate against.
 Usage:
     python generate_video.py [--output test_video.avi]
                              [--fps 10]
-                             [--duration 30]
+                             [--frames 128]
+                             [--motion-start 56]
+                             [--motion-frames 16]
+                             [--step-pixels 30]
 """
 
 import argparse
@@ -24,6 +28,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Scene helpers
 # ---------------------------------------------------------------------------
+
 
 def draw_square(img, cx, cy, size, color=255):
     """Draw a filled square centered at (cx, cy)."""
@@ -41,113 +46,67 @@ def lerp(a, b, t):
 
 
 # ---------------------------------------------------------------------------
-# Segment definitions
+# Scene composition
 # ---------------------------------------------------------------------------
-# Each segment is (duration_sec, description, generator_function).
-# The generator yields one frame at a time.
 
-def static_segment(fps, duration, objects):
-    """Yield identical frames with objects at fixed positions."""
-    num_frames = int(fps * duration)
-    for _ in range(num_frames):
+
+def generate_scene(total_frames, motion_start, motion_frames, step_pixels):
+    """Yield a mostly static sequence with a short burst of large motion."""
+    total_frames = max(1, int(total_frames))
+    motion_start = max(0, min(int(motion_start), total_frames - 1))
+    motion_frames = max(0, min(int(motion_frames), total_frames - motion_start))
+
+    start_x = 120
+    y = 240
+    square_size = 50
+    final_x = start_x + (motion_frames * step_pixels)
+
+    for idx in range(total_frames):
         frame = np.zeros((480, 640), dtype=np.uint8)
-        for (cx, cy, sz) in objects:
-            draw_square(frame, cx, cy, sz)
+
+        if idx < motion_start:
+            cx = start_x
+        elif idx < motion_start + motion_frames:
+            # Move 30 pixels per frame by default so the thumbnail differences
+            # are obvious even after downscaling to 40x30.
+            cx = start_x + ((idx - motion_start + 1) * step_pixels)
+        else:
+            cx = final_x
+
+        draw_square(frame, cx, y, square_size)
         yield frame
-
-
-def moving_segment(fps, duration, static_objs, moving_obj):
-    """
-    Yield frames where one object moves linearly from start to end.
-    moving_obj: (start_cx, start_cy, end_cx, end_cy, size)
-    """
-    num_frames = int(fps * duration)
-    sx, sy, ex, ey, sz = moving_obj
-    for i in range(num_frames):
-        t = i / max(1, num_frames - 1)
-        frame = np.zeros((480, 640), dtype=np.uint8)
-        # Draw static objects first
-        for (cx, cy, s) in static_objs:
-            draw_square(frame, cx, cy, s)
-        # Draw moving object
-        draw_square(frame, lerp(sx, ex, t), lerp(sy, ey, t), sz)
-        yield frame
-
-
-# ---------------------------------------------------------------------------
-# Full scene composition
-# ---------------------------------------------------------------------------
-
-def generate_scene(fps, target_duration):
-    """
-    Build a repeating pattern of static / motion segments until
-    we reach target_duration seconds worth of frames.
-
-    Pattern per cycle (~15 s at default):
-      1. Static  3 s  – one square at left
-      2. Moving  4 s  – square slides left → right
-      3. Static  2 s  – square rests at right
-      4. Moving  3 s  – square slides right → left, second square drops top → bottom
-      5. Static  3 s  – both squares stationary
-    """
-
-    frames_needed = int(fps * target_duration)
-    frames_emitted = 0
-
-    while frames_emitted < frames_needed:
-        # --- Segment 1: static, single object ---
-        for f in static_segment(fps, 3, [(120, 240, 50)]):
-            yield f
-            frames_emitted += 1
-            if frames_emitted >= frames_needed:
-                return
-
-        # --- Segment 2: square moves left → right ---
-        for f in moving_segment(fps, 4, [], (120, 240, 520, 240, 50)):
-            yield f
-            frames_emitted += 1
-            if frames_emitted >= frames_needed:
-                return
-
-        # --- Segment 3: static, square at right ---
-        for f in static_segment(fps, 2, [(520, 240, 50)]):
-            yield f
-            frames_emitted += 1
-            if frames_emitted >= frames_needed:
-                return
-
-        # --- Segment 4: square returns, second square drops ---
-        # We approximate this by yielding custom frames.
-        n4 = int(fps * 3)
-        for i in range(n4):
-            t = i / max(1, n4 - 1)
-            frame = np.zeros((480, 640), dtype=np.uint8)
-            # Square A moves right → left
-            draw_square(frame, lerp(520, 120, t), 240, 50)
-            # Square B drops top → bottom
-            draw_square(frame, 320, lerp(60, 420, t), 40)
-            yield frame
-            frames_emitted += 1
-            if frames_emitted >= frames_needed:
-                return
-
-        # --- Segment 5: static, two objects ---
-        for f in static_segment(fps, 3, [(120, 240, 50), (320, 420, 40)]):
-            yield f
-            frames_emitted += 1
-            if frames_emitted >= frames_needed:
-                return
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="Generate synthetic test video")
     parser.add_argument("--output", default="test_video.avi", help="Output file")
     parser.add_argument("--fps", type=int, default=10, help="Frames per second")
-    parser.add_argument("--duration", type=int, default=30, help="Duration in seconds")
+    parser.add_argument(
+        "--frames", type=int, default=128, help="Total frames in the output video"
+    )
+    parser.add_argument(
+        "--motion-start",
+        type=int,
+        default=56,
+        help="Frame index where the motion burst begins",
+    )
+    parser.add_argument(
+        "--motion-frames",
+        type=int,
+        default=16,
+        help="Number of frames used for explicit motion",
+    )
+    parser.add_argument(
+        "--step-pixels",
+        type=int,
+        default=30,
+        help="How far the object moves each motion frame",
+    )
     args = parser.parse_args()
 
     fourcc = cv2.VideoWriter_fourcc(*"MJPG")
@@ -157,7 +116,9 @@ def main():
         raise RuntimeError(f"Cannot open VideoWriter for {args.output}")
 
     frame_count = 0
-    for frame in generate_scene(args.fps, args.duration):
+    for frame in generate_scene(
+        args.frames, args.motion_start, args.motion_frames, args.step_pixels
+    ):
         writer.write(frame)
         frame_count += 1
 
