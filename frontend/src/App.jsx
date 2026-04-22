@@ -2,26 +2,19 @@ import { useEffect, useState } from "react";
 
 const WS_URL = "ws://localhost:8000/ws";
 const API_BASE = "http://localhost:8000";
-const MAX_LATENCY_POINTS = 24;
-const MAX_TREND_POINTS = 120;
-const TEST_GROUPS = [10, 20, 100];
+const MAX_LATENCY_POINTS = 30;
+const MAX_MOTION_EVENTS = 60;
 const COMPACT_NUMBER = new Intl.NumberFormat("en", {
   notation: "compact",
   maximumFractionDigits: 2,
 });
 
-function createEmptyTrends() {
-  return TEST_GROUPS.reduce((acc, n) => {
-    acc[n] = { latency: [], interval: [] };
-    return acc;
-  }, {});
-}
-
 function App() {
   const [images, setImages] = useState([]);
   const [isConnected, setIsConnected] = useState(false);
   const [latencyPoints, setLatencyPoints] = useState([]);
-  const [trendByTest, setTrendByTest] = useState(() => createEmptyTrends());
+  const [intervalPoints, setIntervalPoints] = useState([]);
+  const [motionTimeline, setMotionTimeline] = useState([]);
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
@@ -37,28 +30,23 @@ function App() {
         [...prev, data.latency].slice(-MAX_LATENCY_POINTS),
       );
 
-      const testGroup = Number(data.test_group);
-      if (Number.isFinite(testGroup)) {
-        setTrendByTest((prev) => {
-          const current = prev[testGroup] ?? { latency: [], interval: [] };
-          const nextLatency = [...current.latency, data.latency].slice(
-            -MAX_TREND_POINTS,
-          );
-          const nextInterval = Number.isFinite(data.recv_interval_s)
-            ? [...current.interval, data.recv_interval_s].slice(
-                -MAX_TREND_POINTS,
-              )
-            : current.interval;
-
-          return {
-            ...prev,
-            [testGroup]: {
-              latency: nextLatency,
-              interval: nextInterval,
-            },
-          };
-        });
+      if (Number.isFinite(data.recv_interval_s)) {
+        setIntervalPoints((prev) =>
+          [...prev, data.recv_interval_s].slice(-MAX_LATENCY_POINTS),
+        );
       }
+
+      // Build motion timeline entry
+      setMotionTimeline((prev) =>
+        [
+          ...prev,
+          {
+            frame: data.frame_index,
+            time: data.timestamp,
+            latency: data.latency,
+          },
+        ].slice(-MAX_MOTION_EVENTS),
+      );
     };
 
     return () => ws.close();
@@ -69,12 +57,10 @@ function App() {
   const latestLatency = images[0]?.latency;
   const sparklineWidth = 320;
   const sparklineHeight = 96;
-  const safePacketLoss = latestStats
-    ? Math.max(0, latestStats.packet_loss)
-    : undefined;
 
   return (
     <div className="min-h-screen bg-[#050816] text-slate-100">
+      {/* Background decorations */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="absolute -left-24 top-0 h-72 w-72 rounded-full bg-cyan-500/20 blur-3xl animate-[pulse_8s_ease-in-out_infinite]" />
         <div className="absolute -right-32 top-24 h-96 w-96 rounded-full bg-fuchsia-500/15 blur-3xl animate-[pulse_10s_ease-in-out_infinite]" />
@@ -83,6 +69,7 @@ function App() {
       </div>
 
       <div className="relative mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8">
+        {/* ───── Header ───── */}
         <header className="overflow-hidden rounded-4xl border border-cyan-400/20 bg-white/5 shadow-[0_0_0_1px_rgba(34,211,238,0.08),0_20px_80px_rgba(0,0,0,0.45)] backdrop-blur-xl">
           <div className="border-b border-white/10 px-6 py-4 sm:px-8">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -92,8 +79,11 @@ function App() {
                 </div>
                 <div>
                   <h1 className="text-2xl font-semibold tracking-tight text-white sm:text-3xl">
-                    Camera Detection Dashboard
+                    Motion Detection Dashboard
                   </h1>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Level 2 — Video-based motion sensor simulation
+                  </p>
                 </div>
               </div>
 
@@ -106,9 +96,14 @@ function App() {
             </div>
           </div>
 
+          {/* Top stat pills + latency sparkline */}
           <div className="grid gap-4 px-6 py-6 sm:px-8 lg:grid-cols-[1.25fr_0.75fr]">
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              <StatPill label="Images" value={String(imageCount)} tone="cyan" />
+              <StatPill
+                label="Motion events"
+                value={String(imageCount)}
+                tone="cyan"
+              />
               <StatPill
                 label="Avg latency"
                 value={
@@ -119,9 +114,11 @@ function App() {
                 tone="amber"
               />
               <StatPill
-                label="Packet loss"
+                label="Latency range"
                 value={
-                  latestStats ? COMPACT_NUMBER.format(safePacketLoss) : "--"
+                  latestStats
+                    ? `${formatDuration(latestStats.min_latency, "ms")} – ${formatDuration(latestStats.max_latency, "ms")}`
+                    : "--"
                 }
                 tone="rose"
               />
@@ -143,7 +140,7 @@ function App() {
                     Latency trace
                   </p>
                   <p className="mt-1 text-sm text-slate-200">
-                    Live sparkline for the last {MAX_LATENCY_POINTS} packets
+                    Last {MAX_LATENCY_POINTS} motion events
                   </p>
                 </div>
                 <div className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-200">
@@ -164,31 +161,33 @@ function App() {
           </div>
         </header>
 
+        {/* ───── Main content ───── */}
         <main className="mt-6 flex-1 space-y-6">
+          {/* Metric cards */}
           {latestStats ? (
             <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <MetricCard
-                title="Packets received"
-                value={`${latestStats.total_received} / ${latestStats.expected}`}
-                caption={`Packet loss: ${COMPACT_NUMBER.format(safePacketLoss)}`}
+                title="Total received"
+                value={COMPACT_NUMBER.format(latestStats.total_received)}
+                caption="Motion-triggered frames from ESP32"
                 accent="from-cyan-400 to-blue-500"
-              />
-              <MetricCard
-                title="Latency range"
-                value={`${formatDuration(latestStats.min_latency, "ms")} - ${formatDuration(latestStats.max_latency, "ms")}`}
-                caption="Fastest and slowest observed packets"
-                accent="from-fuchsia-400 to-pink-500"
               />
               <MetricCard
                 title="Session average"
                 value={formatDuration(latestStats.avg_latency, "ms")}
-                caption="Running average across the current session"
+                caption="Running average latency"
                 accent="from-amber-400 to-orange-500"
+              />
+              <MetricCard
+                title="Latency range"
+                value={`${formatDuration(latestStats.min_latency, "ms")} – ${formatDuration(latestStats.max_latency, "ms")}`}
+                caption="Min and max observed latency"
+                accent="from-fuchsia-400 to-pink-500"
               />
               <MetricCard
                 title="Capture cadence"
                 value={formatDuration(latestStats.avg_interval, "s")}
-                caption="Average receive interval between frames"
+                caption="Average interval between motion events"
                 accent="from-emerald-400 to-teal-500"
               />
             </section>
@@ -198,43 +197,67 @@ function App() {
                 📡
               </div>
               <h2 className="mt-4 text-lg font-semibold text-white">
-                Waiting for camera data
+                Waiting for motion data
               </h2>
               <p className="mt-2 text-sm text-slate-400">
-                Once MQTT packets arrive, live telemetry and image tiles will
-                fill the console.
+                Once the ESP32 detects motion in the video stream, frames will
+                appear here.
               </p>
             </section>
           )}
 
-          <section className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
-            {TEST_GROUPS.map((group) => {
-              const testStats = latestStats?.by_test?.[String(group)];
-              const trend = trendByTest[group] ?? { latency: [], interval: [] };
+          {/* Motion timeline + interval trend */}
+          <section className="grid gap-4 lg:grid-cols-2">
+            {/* Motion timeline */}
+            <MotionTimelineCard
+              motionTimeline={motionTimeline}
+              totalFrames={latestStats?.motion_frames}
+            />
 
-              return (
-                <TestTrendCard
-                  key={group}
-                  group={group}
-                  trend={trend}
-                  stats={testStats}
+            {/* Interval trend */}
+            <article className="overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)] backdrop-blur-xl">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.22em] text-slate-400">
+                    Receive interval trend
+                  </p>
+                  <p className="mt-1 text-sm text-slate-200">
+                    Time between consecutive motion events
+                  </p>
+                </div>
+                <div className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs text-emerald-200">
+                  {intervalPoints.length > 0
+                    ? formatDuration(intervalPoints.at(-1), "s")
+                    : "No data"}
+                </div>
+              </div>
+              <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-2">
+                <Sparkline
+                  values={intervalPoints}
+                  width={300}
+                  height={96}
+                  strokeStart="#34d399"
+                  strokeMid="#10b981"
+                  strokeEnd="#a7f3d0"
                 />
-              );
-            })}
+              </div>
+            </article>
           </section>
 
+          {/* ───── Image gallery ───── */}
           <section className="rounded-[1.75rem] border border-white/10 bg-white/5 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.03)] backdrop-blur-xl sm:p-6">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-lg font-semibold tracking-tight text-white">
-                  Latest captures
+                  Motion captures
                 </h2>
                 <p className="text-sm text-slate-400">
-                  Recent image frames pushed from the device over MQTT.
+                  Frames transmitted by ESP32 when motion was detected in the
+                  video stream.
                 </p>
               </div>
               <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-300">
-                Showing up to 100 frames
+                {imageCount} motion event{imageCount !== 1 ? "s" : ""}
               </span>
             </div>
 
@@ -248,30 +271,31 @@ function App() {
                     <div className="relative aspect-4/3 overflow-hidden bg-slate-900">
                       <img
                         src={`${API_BASE}${img.image_url}`}
-                        alt={`Captured frame ${i + 1}`}
+                        alt={`Motion frame ${img.frame_index ?? i}`}
                         className="h-full w-full object-cover transition duration-500 group-hover:scale-105"
                         loading="lazy"
                       />
+                      {/* Latency badge */}
                       <div className="absolute left-3 top-3 rounded-full border border-white/15 bg-slate-950/70 px-2.5 py-1 text-xs font-medium text-cyan-200 backdrop-blur">
                         {img.latency.toFixed(2)} ms
                       </div>
-                      {Number.isFinite(img.test_group) && (
-                        <div className="absolute right-3 top-3 rounded-full border border-white/15 bg-slate-950/70 px-2.5 py-1 text-xs font-medium text-emerald-200 backdrop-blur">
-                          N={img.test_group}
-                        </div>
-                      )}
+                      {/* Motion badge */}
+                      <div className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full border border-rose-400/30 bg-slate-950/70 px-2.5 py-1 text-xs font-medium text-rose-300 backdrop-blur">
+                        <span className="h-1.5 w-1.5 rounded-full bg-rose-400 shadow-[0_0_8px_rgba(248,113,113,0.8)] animate-pulse" />
+                        Motion
+                      </div>
                     </div>
                     <div className="flex items-center justify-between gap-3 px-4 py-3">
                       <div>
                         <p className="text-sm font-medium text-white">
-                          Live frame #{img.sequence_in_test ?? "-"}
+                          Frame #{img.frame_index ?? "-"}
                         </p>
                         <p className="text-xs text-slate-400">
                           {new Date(img.timestamp / 1000).toLocaleTimeString()}
                         </p>
                       </div>
                       <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-xs font-semibold text-emerald-300">
-                        Online
+                        Detected
                       </span>
                     </div>
                   </article>
@@ -279,7 +303,7 @@ function App() {
               </div>
             ) : (
               <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 p-8 text-center text-sm text-slate-400">
-                No images received yet.
+                No motion events received yet.
               </div>
             )}
           </section>
@@ -288,6 +312,74 @@ function App() {
     </div>
   );
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Motion Timeline Card
+ * Shows which video frame indices triggered motion detection.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+function MotionTimelineCard({ motionTimeline }) {
+  return (
+    <article className="overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)] backdrop-blur-xl">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-xs uppercase tracking-[0.22em] text-slate-400">
+            Motion event timeline
+          </p>
+          <p className="mt-1 text-sm text-slate-200">
+            Video frame indices where motion was detected
+          </p>
+        </div>
+        <div className="rounded-full border border-rose-400/20 bg-rose-400/10 px-3 py-1 text-xs text-rose-200">
+          {motionTimeline.length} event{motionTimeline.length !== 1 ? "s" : ""}
+        </div>
+      </div>
+
+      {motionTimeline.length > 0 ? (
+        <>
+          {/* Frame index sparkline */}
+          <div className="mt-4 rounded-2xl border border-white/10 bg-black/20 p-2">
+            <Sparkline
+              values={motionTimeline.map((e) => e.frame)}
+              width={300}
+              height={72}
+              strokeStart="#f43f5e"
+              strokeMid="#fb923c"
+              strokeEnd="#fbbf24"
+            />
+          </div>
+
+          {/* Recent events list */}
+          <div className="mt-4 max-h-40 overflow-y-auto space-y-1.5 pr-1">
+            {[...motionTimeline].reverse().slice(0, 10).map((evt, i) => (
+              <div
+                key={i}
+                className="flex items-center justify-between rounded-xl border border-white/5 bg-black/20 px-3 py-1.5 text-xs"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="h-1.5 w-1.5 rounded-full bg-rose-400 shadow-[0_0_6px_rgba(248,113,113,0.7)]" />
+                  <span className="text-slate-200">
+                    Frame #{evt.frame}
+                  </span>
+                </div>
+                <span className="text-slate-400">
+                  {formatDuration(evt.latency, "ms")} latency
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className="mt-4 rounded-2xl border border-dashed border-white/10 bg-black/20 p-6 text-center text-xs text-slate-400">
+          No motion events yet.
+        </div>
+      )}
+    </article>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Shared components
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
 function StatPill({ label, value, tone }) {
   const tones = {
@@ -326,84 +418,6 @@ function MetricCard({ title, value, caption, accent }) {
   );
 }
 
-function TestTrendCard({ group, trend, stats }) {
-  const latencyLast = trend.latency.at(-1);
-  const intervalLast = trend.interval.at(-1);
-
-  return (
-    <article className="overflow-hidden rounded-[1.75rem] border border-white/10 bg-white/5 p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.03)] backdrop-blur-xl">
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-xs uppercase tracking-[0.22em] text-slate-400">
-            Test group
-          </p>
-          <p className="mt-1 text-xl font-semibold text-white">N={group}</p>
-        </div>
-        <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300">
-          {stats ? `${stats.received}/${stats.expected}` : "0/0"}
-        </div>
-      </div>
-
-      <div className="mt-4 space-y-4">
-        <div>
-          <div className="mb-2 flex items-center justify-between text-xs">
-            <span className="uppercase tracking-[0.2em] text-slate-400">
-              Latency trend
-            </span>
-            <span className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2 py-0.5 text-cyan-200">
-              {Number.isFinite(latencyLast)
-                ? formatDuration(latencyLast, "ms")
-                : "No data"}
-            </span>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
-            <Sparkline
-              values={trend.latency}
-              width={300}
-              height={72}
-              strokeStart="#22d3ee"
-              strokeMid="#3b82f6"
-              strokeEnd="#22c55e"
-            />
-          </div>
-        </div>
-
-        <div>
-          <div className="mb-2 flex items-center justify-between text-xs">
-            <span className="uppercase tracking-[0.2em] text-slate-400">
-              Interval trend
-            </span>
-            <span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2 py-0.5 text-emerald-200">
-              {Number.isFinite(intervalLast)
-                ? formatDuration(intervalLast, "s")
-                : "No data"}
-            </span>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-black/20 p-2">
-            <Sparkline
-              values={trend.interval}
-              width={300}
-              height={72}
-              strokeStart="#34d399"
-              strokeMid="#10b981"
-              strokeEnd="#a7f3d0"
-            />
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400">
-        <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-          Avg latency: {stats ? formatDuration(stats.avg_latency, "ms") : "--"}
-        </div>
-        <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-          Avg interval: {stats ? formatDuration(stats.avg_interval, "s") : "--"}
-        </div>
-      </div>
-    </article>
-  );
-}
-
 function formatDuration(value, unit) {
   if (!Number.isFinite(value)) return "--";
 
@@ -411,7 +425,6 @@ function formatDuration(value, unit) {
     if (value >= 1000) {
       return `${(value / 1000).toFixed(2)} s`;
     }
-
     return `${value.toFixed(2)} ms`;
   }
 
@@ -420,7 +433,6 @@ function formatDuration(value, unit) {
       const minutes = value / 60;
       return `${minutes.toFixed(2)} min`;
     }
-
     return `${value.toFixed(2)} s`;
   }
 
