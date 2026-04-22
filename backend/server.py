@@ -1,15 +1,3 @@
-"""
-server.py -- Level 2 Backend
-=============================
-Receives motion-detected JPEG frames from the ESP32 via MQTT, stores them,
-and pushes live data to the React frontend over WebSocket.
-
-Key difference from Level 1:
-  - The ESP32 only transmits frames where motion was detected.
-  - test_group is always 0; sequence_in_test is the video frame index.
-  - Statistics track motion events rather than fixed test groups.
-"""
-
 import os
 import struct
 import time
