@@ -1,0 +1,17 @@
+# ESP-IDF Custom Partition Table for Level 2 (video frames in flash)
+#
+# With 2 MB flash, the default single-app table allocates only 1 MB for the
+# app partition.  The video frame data pushes the binary to ~1.53 MB, so we
+# need to reclaim nearly all available flash for the app.
+#
+# Layout (2 MB = 0x200000):
+#   0x0000  - 0x0FFF   : reserved (second-stage bootloader)
+#   0x8000  - 0x8FFF   : partition table
+#   0x9000  - 0xEFFF   : NVS (24 KB) -- stores WiFi credentials
+#   0xF000  - 0xFFFF   : PHY init data (4 KB)
+#   0x10000 - 0x1FFFFF : factory app (1,966,080 bytes = ~1.88 MB)
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x6000,
+phy_init,   data, phy,      0xf000,   0x1000,
+factory,    app,  factory,  0x10000,  0x1F0000,
