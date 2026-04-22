@@ -1,3 +1,10 @@
+"""
+subscriber.py -- Level 2 CLI Subscriber
+========================================
+Standalone MQTT subscriber for debugging.
+Receives motion-detected frames, saves them, and prints statistics.
+"""
+
 import os
 import struct
 import time
@@ -17,42 +24,36 @@ IMAGE_DIR = "received"
 latencies = []
 recv_timestamps = []
 total_received = 0
+frame_indices = []
 
-EXPECTED_TOTAL = 130  # 10 + 20 + 100
 HEADER_FMT = "<QHHI"  # ts_sent_us, test_group, sequence_in_test, image_size
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
-# Ensure directory exists
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
 
-# DATABASE SETUP
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-
     cursor.execute(
         """
     CREATE TABLE IF NOT EXISTS images (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        test_group INTEGER,
+        sequence_in_test INTEGER,
         timestamp_sent INTEGER,
         timestamp_received INTEGER,
         latency_ms REAL,
+        sent_interval_s REAL,
         image_path TEXT
     )
     """
     )
-
     conn.commit()
     conn.close()
 
 
-# PACKET PARSER
 def parse_packet(payload: bytes):
-    """
-    Parse binary packet:
-    [8 bytes timestamp][2 bytes test_group][2 bytes sequence][4 bytes size][image]
-    """
     if len(payload) < HEADER_SIZE:
         raise ValueError("Payload too small")
 
@@ -61,42 +62,35 @@ def parse_packet(payload: bytes):
     )
 
     image_data = payload[HEADER_SIZE : HEADER_SIZE + image_size]
-
     if len(image_data) != image_size:
         raise ValueError("Image size mismatch")
 
     return timestamp_sent, test_group, sequence_in_test, image_data
 
 
-# SAVE IMAGE
 def save_image(image_data, timestamp_received):
     filename = f"{timestamp_received}.jpg"
     path = os.path.join(IMAGE_DIR, filename)
-
     with open(path, "wb") as f:
         f.write(image_data)
-
     return path
 
 
-# STORE METADATA
-def store_metadata(timestamp_sent, timestamp_received, latency_ms, image_path):
+def store_metadata(timestamp_sent, timestamp_received, latency_ms, frame_idx, image_path):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-
     cursor.execute(
         """
-    INSERT INTO images (timestamp_sent, timestamp_received, latency_ms, image_path)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO images (test_group, sequence_in_test, timestamp_sent,
+                        timestamp_received, latency_ms, image_path)
+    VALUES (0, ?, ?, ?, ?, ?)
     """,
-        (timestamp_sent, timestamp_received, latency_ms, image_path),
+        (frame_idx, timestamp_sent, timestamp_received, latency_ms, image_path),
     )
-
     conn.commit()
     conn.close()
 
 
-# MQTT CALLBACKS
 def on_connect(client, userdata, flags, rc):
     print(f"[MQTT] Connected with result code {rc}")
     client.subscribe(MQTT_TOPIC)
@@ -116,23 +110,22 @@ def on_message(client, userdata, msg):
 
         latencies.append(latency_ms)
         recv_timestamps.append(recv_time_us)
-
+        frame_indices.append(sequence_in_test)
         total_received += 1
 
-        # Save image
         image_path = save_image(image_data, recv_time_us)
+        store_metadata(timestamp_sent, recv_time_us, latency_ms, sequence_in_test, image_path)
 
-        # Store to DB
-        store_metadata(timestamp_sent, recv_time_us, latency_ms, image_path)
-
-        print(f"[RECV] N={test_group} seq={sequence_in_test} image saved: {image_path}")
-        print(f"[INFO] Latency: {latency_ms:.2f} ms")
+        print(
+            f"[MOTION] frame={sequence_in_test} | "
+            f"latency={latency_ms:.2f} ms | "
+            f"saved: {image_path}"
+        )
 
     except Exception as e:
         print(f"[ERROR] {e}")
 
 
-# Interval calculation
 def compute_intervals():
     intervals = []
     for i in range(1, len(recv_timestamps)):
@@ -141,7 +134,6 @@ def compute_intervals():
     return intervals
 
 
-# Summary
 def print_summary():
     print("\n===== SESSION SUMMARY =====")
 
@@ -156,11 +148,8 @@ def print_summary():
     intervals = compute_intervals()
     avg_interval = sum(intervals) / len(intervals) if intervals else 0
 
-    packet_loss = EXPECTED_TOTAL - total_received
-
     print(f"Total Received   : {total_received}")
-    print(f"Expected         : {EXPECTED_TOTAL}")
-    print(f"Packet Loss      : {packet_loss}")
+    print(f"Motion frames    : {len(set(frame_indices))} unique frame indices")
 
     print("\nLatency (ms):")
     print(f"  Avg            : {avg_latency:.2f}")
@@ -173,7 +162,6 @@ def print_summary():
     print("===========================\n")
 
 
-# MAIN
 def main():
     init_db()
 
@@ -183,7 +171,7 @@ def main():
 
     client.connect(MQTT_BROKER, MQTT_PORT, 60)
 
-    print("[SYSTEM] Subscriber started...")
+    print("[SYSTEM] Level 2 subscriber started (motion detection mode)...")
     try:
         client.loop_forever()
     except KeyboardInterrupt:

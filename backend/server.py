@@ -1,3 +1,15 @@
+"""
+server.py -- Level 2 Backend
+=============================
+Receives motion-detected JPEG frames from the ESP32 via MQTT, stores them,
+and pushes live data to the React frontend over WebSocket.
+
+Key difference from Level 1:
+  - The ESP32 only transmits frames where motion was detected.
+  - test_group is always 0; sequence_in_test is the video frame index.
+  - Statistics track motion events rather than fixed test groups.
+"""
+
 import os
 import struct
 import time
@@ -18,40 +30,40 @@ MQTT_TOPIC = "esp32/image"
 DB_NAME = "camerasensor.db"
 IMAGE_DIR = "received"
 
-EXPECTED_TOTAL = 130  # Total expected images
-EXPECTED_TEST_GROUPS = (10, 20, 100)
-
 os.makedirs(IMAGE_DIR, exist_ok=True)
 
-# Global state for statistics
+# ---------------------------------------------------------------------------
+# Global state -- motion-event oriented statistics
+# ---------------------------------------------------------------------------
 latencies = []
 recv_timestamps = []
-total_received = 0
-latencies_by_test = {n: [] for n in EXPECTED_TEST_GROUPS}
-recv_timestamps_by_test = {n: [] for n in EXPECTED_TEST_GROUPS}
-recv_intervals_by_test = {n: [] for n in EXPECTED_TEST_GROUPS}
+recv_intervals = []
+total_received = 0           # Total motion-detected frames received
+frame_indices = []           # Track which video frame indices had motion
 
 HEADER_FMT = "<QHHI"  # ts_sent_us, test_group, sequence_in_test, image_size
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
 
 
-# LIFESPAN HANDLER
+# ---------------------------------------------------------------------------
+# Lifespan handler
+# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     init_db()
     thread = threading.Thread(target=mqtt_thread)
     thread.daemon = True
     thread.start()
     yield
-    # Shutdown
 
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/images", StaticFiles(directory=IMAGE_DIR), name="images")
 
 
-# WEBSOCKET MANAGER
+# ---------------------------------------------------------------------------
+# WebSocket manager
+# ---------------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
         self.active_connections = []
@@ -71,9 +83,10 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-# DB
+# ---------------------------------------------------------------------------
+# Database
+# ---------------------------------------------------------------------------
 def init_db():
-    """Initialize database and create tables if they don't exist"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
@@ -92,10 +105,10 @@ def init_db():
     """
     )
 
+    # Ensure all columns exist (forward-compatible with Level 1 schema)
     existing_columns = {
         row[1] for row in cursor.execute("PRAGMA table_info(images)").fetchall()
     }
-
     if "test_group" not in existing_columns:
         cursor.execute("ALTER TABLE images ADD COLUMN test_group INTEGER")
     if "sequence_in_test" not in existing_columns:
@@ -112,86 +125,44 @@ def store_metadata(
 ):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-
     cursor.execute(
         """
     INSERT INTO images (
-        test_group,
-        sequence_in_test,
-        timestamp_sent,
-        timestamp_received,
-        latency_ms,
-        sent_interval_s,
-        image_path
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+        test_group, sequence_in_test,
+        timestamp_sent, timestamp_received,
+        latency_ms, sent_interval_s, image_path
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
     """,
         (test_group, sequence_in_test, ts_sent, ts_recv, latency, sent_interval, path),
     )
-
     conn.commit()
     conn.close()
 
 
-# STATISTICS
-def compute_intervals():
-    """Calculate time intervals between received images"""
-    intervals = []
-    for i in range(1, len(recv_timestamps)):
-        dt = (recv_timestamps[i] - recv_timestamps[i - 1]) / 1_000_000
-        intervals.append(dt)
-    return intervals
-
-
+# ---------------------------------------------------------------------------
+# Statistics -- motion-event oriented
+# ---------------------------------------------------------------------------
 def get_statistics():
-    """Compute current session statistics"""
     if not latencies:
         return {
             "total_received": 0,
-            "expected": EXPECTED_TOTAL,
-            "packet_loss": EXPECTED_TOTAL,
             "avg_latency": 0,
             "min_latency": 0,
             "max_latency": 0,
             "avg_interval": 0,
-        }
-
-    recv_intervals = compute_intervals()
-    recv_intervals = [
-        interval
-        for n in EXPECTED_TEST_GROUPS
-        for interval in recv_intervals_by_test.get(n, [])
-    ]
-
-    by_test = {}
-    for n in EXPECTED_TEST_GROUPS:
-        test_latencies = latencies_by_test.get(n, [])
-        test_recv_intervals = recv_intervals_by_test.get(n, [])
-        by_test[str(n)] = {
-            "received": len(test_latencies),
-            "expected": n,
-            "packet_loss": max(0, n - len(test_latencies)),
-            "avg_latency": (
-                (sum(test_latencies) / len(test_latencies)) if test_latencies else 0
-            ),
-            "avg_interval": (
-                (sum(test_recv_intervals) / len(test_recv_intervals))
-                if test_recv_intervals
-                else 0
-            ),
+            "motion_frames": [],
         }
 
     return {
         "total_received": total_received,
-        "expected": EXPECTED_TOTAL,
-        "packet_loss": max(0, EXPECTED_TOTAL - total_received),
         "avg_latency": sum(latencies) / len(latencies),
         "min_latency": min(latencies),
         "max_latency": max(latencies),
         "avg_interval": (
             sum(recv_intervals) / len(recv_intervals) if recv_intervals else 0
         ),
-        "by_test": by_test,
+        # Send the last 20 frame indices to show the motion event timeline
+        "motion_frames": frame_indices[-20:],
     }
 
 
@@ -211,56 +182,47 @@ def parse_packet(payload):
     return ts_sent_us, test_group, sequence_in_test, image_data
 
 
-# MQTT HANDLER
+# ---------------------------------------------------------------------------
+# MQTT handler
+# ---------------------------------------------------------------------------
 def on_message(client, userdata, msg):
     try:
         recv_time = time.time_ns() // 1000
 
         ts_sent, test_group, sequence_in_test, img_data = parse_packet(msg.payload)
 
-        if test_group not in latencies_by_test:
-            latencies_by_test[test_group] = []
-            recv_timestamps_by_test[test_group] = []
-            recv_intervals_by_test[test_group] = []
-
         latency = max(0.0, (recv_time - ts_sent) / 1000.0)
 
+        # Compute receive interval
         recv_interval = None
-        if recv_timestamps_by_test[test_group]:
-            delta_us = recv_time - recv_timestamps_by_test[test_group][-1]
+        if recv_timestamps:
+            delta_us = recv_time - recv_timestamps[-1]
             if delta_us >= 0:
                 recv_interval = delta_us / 1_000_000
-                recv_intervals_by_test[test_group].append(recv_interval)
+                recv_intervals.append(recv_interval)
 
-        recv_timestamps_by_test[test_group].append(recv_time)
-
+        # Save image
         filename = f"{recv_time}.jpg"
         path = os.path.join(IMAGE_DIR, filename)
-
         with open(path, "wb") as f:
             f.write(img_data)
 
         store_metadata(
-            test_group,
-            sequence_in_test,
-            ts_sent,
-            recv_time,
-            latency,
-            recv_interval,
-            path,
+            test_group, sequence_in_test,
+            ts_sent, recv_time, latency, recv_interval, path,
         )
 
-        # Push to frontend (async)
-        import asyncio
-
+        # Update global state
         global total_received
         latencies.append(latency)
-        latencies_by_test[test_group].append(latency)
         recv_timestamps.append(recv_time)
+        frame_indices.append(sequence_in_test)
         total_received += 1
 
         stats = get_statistics()
 
+        # Push to frontend
+        import asyncio
         asyncio.run(
             manager.broadcast(
                 {
@@ -268,8 +230,8 @@ def on_message(client, userdata, msg):
                     "latency": latency,
                     "timestamp": recv_time,
                     "timestamp_sent": ts_sent,
-                    "test_group": test_group,
-                    "sequence_in_test": sequence_in_test,
+                    "frame_index": sequence_in_test,
+                    "motion_detected": True,
                     "recv_interval_s": recv_interval,
                     "stats": stats,
                 }
@@ -288,13 +250,14 @@ def mqtt_thread():
     client.loop_forever()
 
 
-# WEBSOCKET
+# ---------------------------------------------------------------------------
+# WebSocket endpoint
+# ---------------------------------------------------------------------------
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
-
     try:
         while True:
-            await websocket.receive_text()  # keep alive
+            await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
